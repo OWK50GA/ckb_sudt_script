@@ -1,0 +1,19 @@
+[package]
+name = "ckb_sudt_script"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ckb-std = "1.1"
+
+[features]
+library = []
+native-simulator = ["library", "ckb-std/native-simulator"]
+
+[profile.release]
+overflow-checks = true
+opt-level =  "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
