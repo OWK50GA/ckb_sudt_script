@@ -14,3 +14,4 @@ overflow-checks = true
 strip = false
 codegen-units = 1
 debug = true
+opt-level = "z"
