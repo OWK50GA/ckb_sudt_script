@@ -1,0 +1,142 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ── Check + Clippy (fast feedback, no cross-compilation needed) ────────────
+  check:
+    name: Check & Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-check-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-check-
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo check (workspace)
+        run: cargo check --workspace
+
+      - name: cargo clippy (workspace)
+        run: cargo clippy --workspace -- -D warnings
+
+  # ── Build the RISC-V contract binary ──────────────────────────────────────
+  build-contract:
+    name: Build Contract (RISC-V)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable + RISC-V target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: riscv64imac-unknown-none-elf
+
+      - name: Install LLVM / Clang
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y clang llvm
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-riscv-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-riscv-
+
+      - name: Build contract
+        run: make build
+
+      - name: Upload contract binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ckb_sudt_script
+          path: build/release/ckb_sudt_script
+          retention-days: 7
+
+  # ── Run integration tests (depends on the built binary) ───────────────────
+  test:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: build-contract
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-test-
+
+      - name: Download contract binary
+        uses: actions/download-artifact@v4
+        with:
+          name: ckb_sudt_script
+          path: build/release/
+
+      - name: Make binary executable
+        run: chmod +x build/release/ckb_sudt_script
+
+      - name: Run tests
+        run: cargo test --package tests
+
+  # ── Build the deployer (host target, no cross-compilation) ────────────────
+  build-deployer:
+    name: Build Deployer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install OpenSSL (required by reqwest in ckb-sdk)
+        run: sudo apt-get install -y pkg-config libssl-dev
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-deployer-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-deployer-
+
+      - name: Build deployer
+        run: cargo build -p deployer
+
+      - name: Build keygen
+        run: cargo build --bin keygen

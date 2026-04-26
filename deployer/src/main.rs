@@ -14,7 +14,7 @@ fn main() -> anyhow::Result<()> {
     let code_outpoint = deploy_script(
         &cfg.ckb_rpc,
         &cfg.address,
-        secret_key.clone(),
+        secret_key,
         "./build/release/ckb_sudt_script",
     )?;
 
