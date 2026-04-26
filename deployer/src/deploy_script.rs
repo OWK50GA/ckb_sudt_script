@@ -205,6 +205,7 @@ pub fn compute_code_hash(
     Ok(blake2b_256(raw.as_ref()).pack())
 }
 
+#[allow(unused)]
 pub fn transfer_tokens(
     ckb_rpc: &str,
     sudt_type_script: Script,
