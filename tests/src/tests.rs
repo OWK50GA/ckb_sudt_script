@@ -14,7 +14,7 @@ fn encode_amount(amount: u128) -> Bytes {
 
 /// Deploy the sUDT type script and return its out-point.
 fn deploy_sudt(context: &mut Context) -> OutPoint {
-    context.deploy_cell_by_name("ckb_lock_script")
+    context.deploy_cell_by_name("ckb_sudt_script")
 }
 
 /// Build a dummy lock script used as the "owner" lock.

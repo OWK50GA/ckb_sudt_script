@@ -262,7 +262,11 @@ pub fn transfer_tokens(
 
         match cell_type_hash {
             Some(hash) if hash == sudt_type_hash => {
-                let output_data = cell.output_data.as_ref().expect("output data not found").as_bytes();
+                let output_data = cell
+                    .output_data
+                    .as_ref()
+                    .expect("output data not found")
+                    .as_bytes();
                 let amount = u128::from_le_bytes(output_data[..16].try_into().unwrap());
                 inputs.push(cell.clone());
                 input_total = input_total.checked_add(amount).expect("overflow");
