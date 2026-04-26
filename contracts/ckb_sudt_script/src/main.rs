@@ -3,12 +3,12 @@
 
 pub mod error;
 
-use error::Error;
 use ckb_std::{
     ckb_constants::Source,
     ckb_types::{bytes::Bytes, prelude::*},
     high_level::{QueryIter, load_cell_data, load_cell_type_hash, load_script},
 };
+use error::Error;
 
 #[cfg(any(feature = "library", test))]
 extern crate alloc;
@@ -41,7 +41,7 @@ pub fn program_entry() -> i8 {
 //                 // let no_of_args = data.field_count();
 //             },
 //             Err(err) => {
-    
+
 //             }
 //         }
 //     }
@@ -89,7 +89,7 @@ fn sudt_main() -> Result<(), Error> {
     // This is used to load the script's args
     // For sUDT, args must be exactly 32 bytes (it is a blake2b-256 hash)
     let script = load_script()?;
-    
+
     let args: Bytes = script.args().unpack();
 
     if args.len() != 32 {

@@ -17,7 +17,7 @@ pub enum Error {
     // Add customized errors here...
     ArgsLength = 10,
     Overflow = 11,
-    OutputOverflow = 12
+    OutputOverflow = 12,
 }
 
 impl From<SysError> for Error {
