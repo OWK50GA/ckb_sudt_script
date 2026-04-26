@@ -70,7 +70,9 @@ fn test_sudt_transfer_equal_amounts() {
         .build();
     let tx = context.complete_tx(tx);
 
-    context.verify_tx(&tx, MAX_CYCLES).expect("transfer equal amounts should pass");
+    context
+        .verify_tx(&tx, MAX_CYCLES)
+        .expect("transfer equal amounts should pass");
 }
 
 /// Transfer where output < input (burning tokens). Should pass.
@@ -111,7 +113,9 @@ fn test_sudt_transfer_burn_tokens() {
         .build();
     let tx = context.complete_tx(tx);
 
-    context.verify_tx(&tx, MAX_CYCLES).expect("burning tokens should pass");
+    context
+        .verify_tx(&tx, MAX_CYCLES)
+        .expect("burning tokens should pass");
 }
 
 /// Owner mode: the owner's lock script hash appears as a type hash of an input cell.
@@ -172,7 +176,9 @@ fn test_sudt_owner_mode_mint() {
         .build();
     let tx = context.complete_tx(tx);
 
-    context.verify_tx(&tx, MAX_CYCLES).expect("owner mode mint should pass");
+    context
+        .verify_tx(&tx, MAX_CYCLES)
+        .expect("owner mode mint should pass");
 }
 
 /// Multiple input/output cells — sums must balance.
@@ -214,7 +220,9 @@ fn test_sudt_multi_cell_transfer() {
         .build();
     let tx = context.complete_tx(tx);
 
-    context.verify_tx(&tx, MAX_CYCLES).expect("multi-cell balanced transfer should pass");
+    context
+        .verify_tx(&tx, MAX_CYCLES)
+        .expect("multi-cell balanced transfer should pass");
 }
 
 // ── failing tests ─────────────────────────────────────────────────────────────

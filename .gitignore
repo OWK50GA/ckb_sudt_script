@@ -2,3 +2,5 @@
 /target
 /tests/failed_txs
 .vscode
+
+**/*/.env
