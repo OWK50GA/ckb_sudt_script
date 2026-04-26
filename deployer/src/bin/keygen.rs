@@ -1,6 +1,6 @@
 use ckb_hash::blake2b_256;
-use ckb_sdk::{Address, AddressPayload, NetworkType};
 use ckb_sdk::constants::SIGHASH_TYPE_HASH;
+use ckb_sdk::{Address, AddressPayload, NetworkType};
 use ckb_types::{bytes::Bytes, core::ScriptHashType, packed::Script, prelude::*};
 use rand::rngs::OsRng;
 use secp256k1::Secp256k1;

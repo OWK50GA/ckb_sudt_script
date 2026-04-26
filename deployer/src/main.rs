@@ -18,7 +18,10 @@ fn main() -> anyhow::Result<()> {
         "./build/release/ckb_sudt_script",
     )?;
 
-    println!("Save this! Code OutPoint tx: {:#x}", code_outpoint.tx_hash());
+    println!(
+        "Save this! Code OutPoint tx: {:#x}",
+        code_outpoint.tx_hash()
+    );
 
     mint_tokens(
         &cfg.ckb_rpc,
