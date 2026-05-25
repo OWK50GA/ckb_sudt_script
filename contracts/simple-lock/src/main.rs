@@ -5,7 +5,10 @@ pub mod error;
 pub mod witness;
 
 use ckb_hash::blake2b_256;
-use ckb_std::{ckb_constants::Source, ckb_types::{bytes::Bytes, prelude::*}};
+use ckb_std::{
+    ckb_constants::Source,
+    ckb_types::{bytes::Bytes, prelude::*},
+};
 use error::Error;
 
 #[cfg(any(feature = "library", test))]
