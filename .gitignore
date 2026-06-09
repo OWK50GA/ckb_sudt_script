@@ -4,3 +4,6 @@
 .vscode
 
 **/*/.env
+
+# Generated IDL artifacts from ckb-idl-derive macro
+idl.json
