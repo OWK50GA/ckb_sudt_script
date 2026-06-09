@@ -71,8 +71,8 @@ fn check_timelock() -> Result<(), Error> {
     }
 
     // ── Step 1: deserialise the witness ──────────────────────────────────────
-    let witness = Witness::from_witness_args(0, Source::GroupInput)
-        .map_err(|_| Error::MissingWitness)?;
+    let witness =
+        Witness::from_witness_args(0, Source::GroupInput).map_err(|_| Error::MissingWitness)?;
 
     // ── Step 2: timelock check ────────────────────────────────────────────────
     // Load the header of the first input cell to read the block timestamp.

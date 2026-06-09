@@ -49,8 +49,8 @@ fn check_hash() -> Result<(), Error> {
     let expected: [u8; 32] = args[..32].try_into().map_err(|_| Error::Encoding)?;
 
     // Deserialise the witness — the struct drives the layout, not raw byte wrangling.
-    let witness = Witness::from_witness_args(0, Source::GroupInput)
-        .map_err(|_| Error::MissingWitness)?;
+    let witness =
+        Witness::from_witness_args(0, Source::GroupInput).map_err(|_| Error::MissingWitness)?;
 
     // Hash the preimage and compare.
     let actual = blake2b_256(witness.preimage.as_slice());
