@@ -33,11 +33,10 @@ fn load_simple_lock_idl() -> IdlDocument {
     // The IDL on disk was written by ckb-idl-derive, which currently emits
     // a subset of IdlDocument (no idl_version, name, signing). We deserialize
     // into a minimal wrapper then promote it.
-    let raw: serde_json::Value =
-        serde_json::from_str(&json).expect("idl.json is not valid JSON");
+    let raw: serde_json::Value = serde_json::from_str(&json).expect("idl.json is not valid JSON");
 
-    let witness_fields: Vec<WitnessField> = serde_json::from_value(raw["witness"].clone())
-        .expect("idl.json has no 'witness' array");
+    let witness_fields: Vec<WitnessField> =
+        serde_json::from_value(raw["witness"].clone()).expect("idl.json has no 'witness' array");
 
     IdlDocument {
         idl_version: "1".to_string(),
@@ -101,7 +100,10 @@ fn test_witness_validation_passes_for_empty_preimage() {
 
     let client = IdlClient::new();
     let result = client.validate_witness_bytes(&idl.witness, &wire);
-    assert!(result.is_ok(), "empty preimage should be structurally valid");
+    assert!(
+        result.is_ok(),
+        "empty preimage should be structurally valid"
+    );
 }
 
 /// A raw byte buffer with no length prefix fails structural validation.
@@ -141,7 +143,10 @@ fn test_witness_validation_fails_for_trailing_bytes() {
     let result = client.validate_witness_bytes(&idl.witness, &wire);
 
     assert!(
-        matches!(result, Err(ckb_idl_client::IdlError::TrailingBytes { trailing: 4, .. })),
+        matches!(
+            result,
+            Err(ckb_idl_client::IdlError::TrailingBytes { trailing: 4, .. })
+        ),
         "expected TrailingBytes {{ trailing: 4 }}, got {:?}",
         result
     );
