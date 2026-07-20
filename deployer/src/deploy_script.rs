@@ -21,18 +21,49 @@ use ckb_types::{
     prelude::{Builder, Entity, Pack, Unpack},
 };
 use secp256k1::SecretKey;
+use sha2::{Sha256, Digest};
 
 // pub const TESTNET_RPC: &str = "https://testnet.ckb.dev";
+
+fn sha256(data: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    hasher.finalize().into()
+}
 
 pub fn deploy_script(
     ckb_rpc: &str,
     deployer_address: &str,
     sender_key: SecretKey,
     script_path: &str,
+    idl_path: Option<&str>,
 ) -> anyhow::Result<OutPoint> {
-    let script_binary = std::fs::read(script_path)?;
-    let script_size = script_binary.len();
+    let mut script_binary = std::fs::read(script_path)?;
+    let mut idl_hash: Vec<u8> = Vec::new();
 
+    match idl_path {
+        Some(path) => {
+            let idl_json_bytes = std::fs::read(path)?;
+            let hash = sha256(&idl_json_bytes);
+            idl_hash.extend_from_slice(&hash);
+
+            // Freeze the exact IDL bytes that were committed
+            // Named after the script binary so it is unambiguous
+            let script_name = std::path::Path::new(script_path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("script");
+            let frozen_path = format!("{script_name}-idl.deployed.json");
+            std::fs::write(&frozen_path, &idl_json_bytes)
+                .map_err(|e| anyhow::anyhow!("Failed to write frozen IDL to {frozen_path}: {e}"))?;
+            println!("Frozen IDL written to: {frozen_path}");
+        }
+        None => {}
+    }
+
+    script_binary.extend_from_slice(&idl_hash);
+
+    let script_size = script_binary.len();
     let required_capacity = (script_size as u64 + 100) * 100_000_000;
 
     println!("Script size: {script_size} bytes");
@@ -174,6 +205,16 @@ pub fn compute_code_hash(
     ckb_client: &CkbRpcClient,
     code_cell_outpoint: &OutPoint,
 ) -> anyhow::Result<ckb_types::packed::Byte32> {
+    let (hash, _) = fetch_code_cell_data(ckb_client, code_cell_outpoint)?;
+    Ok(hash)
+}
+
+/// Fetch the raw cell data and its blake2b-256 hash for a deployed code cell.
+/// Returns (code_hash, raw_cell_data_bytes).
+pub fn fetch_code_cell_data(
+    ckb_client: &CkbRpcClient,
+    code_cell_outpoint: &OutPoint,
+) -> anyhow::Result<(ckb_types::packed::Byte32, Vec<u8>)> {
     let tx_hash = code_cell_outpoint.tx_hash();
     let index: u32 = code_cell_outpoint.index().unpack();
 
@@ -183,9 +224,6 @@ pub fn compute_code_hash(
         .transaction
         .expect("tx data missing");
 
-    // ResponseFormat<TransactionView> wraps Either<TransactionView, JsonBytes>.
-    // The RPC default returns hex/molecule bytes (Either::Right).
-    // We handle both variants.
     let packed_tx = match tx.inner {
         Either::Left(json_tx) => {
             let packed: ckb_types::packed::Transaction = json_tx.inner.into();
@@ -201,8 +239,10 @@ pub fn compute_code_hash(
         .get(index as usize)
         .expect("output data missing");
     let raw: Bytes = data.unpack();
+    let raw_vec = raw.to_vec();
+    let code_hash = blake2b_256(raw.as_ref()).pack();
 
-    Ok(blake2b_256(raw.as_ref()).pack())
+    Ok((code_hash, raw_vec))
 }
 
 #[allow(unused)]

@@ -1,10 +1,33 @@
 mod config;
 mod deploy_script;
+pub mod spend;
 
 use config::Config;
 use deploy_script::{deploy_script, mint_tokens};
 
 fn main() -> anyhow::Result<()> {
+    let command = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "deploy-sudt".to_string());
+
+    let args = std::env::args().skip(2);
+    match command.as_str() {
+        "deploy-sudt" => {
+            deploy_and_mint_sudt()?;
+        }
+        "deploy-simple-lock" => {
+            spend::deploy_simple_lock()?;
+        }
+        "spend-simple-lock" => {
+            spend::spend_simple_lock(args)?;
+        }
+        other => anyhow::bail!("unknown command: {other}"),
+    }
+
+    Ok(())
+}
+
+pub fn deploy_and_mint_sudt() -> anyhow::Result<()> {
     let cfg = Config::from_env()?;
     let secret_key = cfg.secret_key()?;
 
@@ -16,6 +39,7 @@ fn main() -> anyhow::Result<()> {
         &cfg.address,
         secret_key,
         "./build/release/ckb_sudt_script",
+        None,
     )?;
 
     println!(
