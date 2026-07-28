@@ -14,8 +14,8 @@ use ckb_sdk::{
 };
 use ckb_types::{
     bytes::Bytes,
-    core::{DepType, ScriptHashType},
-    packed::{CellDep, CellOutput, OutPoint, Script, WitnessArgs},
+    core::{DepType, ScriptHashType, TransactionView},
+    packed::{CellDep, CellInput, CellOutput, OutPoint, Script, WitnessArgs},
     prelude::{Builder, Entity, Pack, Unpack},
 };
 use secp256k1::SecretKey;
@@ -65,8 +65,8 @@ pub fn spend_simple_lock(mut args: impl Iterator<Item = String>) -> anyhow::Resu
         private_key_bytes: spender_key,
     } = cfg;
 
-    let [string_code_cell_outpoint, string_preimage, string_idl_path] =
-        [args.next(), args.next(), args.next()].map(|x| x.expect("Missing arg"));
+    let [string_code_cell_outpoint, string_preimage, string_idl_path, string_locked_cell_outpoint] =
+        [args.next(), args.next(), args.next(), args.next()].map(|x| x.expect("Missing arg"));
 
     let idl_path = string_idl_path.as_str();
     let bytes_code_cell_outpoint: [u8; 32] =
@@ -75,6 +75,11 @@ pub fn spend_simple_lock(mut args: impl Iterator<Item = String>) -> anyhow::Resu
     let bytes_preimage = hex::decode(string_preimage)?;
     let preimage: &[u8] = &bytes_preimage;
     let code_cell_outpoint = OutPoint::new(packed_code_cell_outpoint, 0);
+
+    // The locked cell — the one actually being spent
+    let bytes_locked_cell: [u8; 32] =
+        hex::decode(string_locked_cell_outpoint)?.try_into().unwrap();
+    let locked_cell_outpoint = OutPoint::new(bytes_locked_cell.pack(), 0);
 
     let ckb_client = CkbRpcClient::new(&ckb_rpc);
 
@@ -127,61 +132,58 @@ pub fn spend_simple_lock(mut args: impl Iterator<Item = String>) -> anyhow::Resu
         .map_err(|e| anyhow::anyhow!("invalid spender address: {e}"))?;
     let spender_lock: Script = spender.payload().into();
 
-    // The lock script for the cell being spent is simple-lock.
-    // code_hash is the hash of (binary + idl_commitment).
-    let simple_lock_script = Script::new_builder()
-        .code_hash(code_hash_packed.clone())
-        .hash_type(ScriptHashType::Data1.into())
-        .args(Bytes::from(blake2b_256(preimage).to_vec()).pack())
-        .build();
-
     // Cell dep pointing at the code cell (the deployed binary).
     let code_cell_dep = CellDep::new_builder()
         .out_point(code_cell_outpoint.clone())
         .dep_type(DepType::Code.into())
         .build();
 
-    let simple_lock_script_id = ScriptId::new_data(simple_lock_script.calc_script_hash().unpack());
-
-    let mut cell_collector = DefaultCellCollector::new(&ckb_rpc);
     let mut cell_dep_resolver = DefaultCellDepResolver::from_genesis(
         &ckb_client.get_block_by_number(0.into())?.unwrap().into(),
     )?;
-    cell_dep_resolver.insert(
-        simple_lock_script_id,
-        code_cell_dep,
-        "simple-lock".to_string(),
-    );
+
+    // Register simple-lock code dep so the VM can load the script bytecode
+    let simple_lock_script = Script::new_builder()
+        .code_hash(code_hash_packed.clone())
+        .hash_type(ScriptHashType::Data1.into())
+        .args(Bytes::from(blake2b_256(preimage).to_vec()).pack())
+        .build();
+    let simple_lock_script_id = ScriptId::new_data(simple_lock_script.calc_script_hash().unpack());
+    cell_dep_resolver.insert(simple_lock_script_id, code_cell_dep.clone(), "simple-lock".to_string());
 
     let header_dep_resolver = DefaultHeaderDepResolver::new(&ckb_rpc);
     let tx_dep_provider = DefaultTransactionDependencyProvider::new(&ckb_rpc, 10);
 
-    let signer =
-        SecpCkbRawKeySigner::new_with_secret_keys(vec![SecretKey::from_byte_array(&spender_key)?]);
+    // Secp256k1 unlocker for funding inputs (fee payment from wallet)
+    let secret_key = SecretKey::from_byte_array(&spender_key)?;
+    let signer = SecpCkbRawKeySigner::new_with_secret_keys(vec![secret_key]);
     let sighash_unlocker = SecpSighashUnlocker::from(Box::new(signer) as Box<_>);
     let sighash_script_id = ScriptId::new_type(SIGHASH_TYPE_HASH.clone());
     let mut unlockers: HashMap<ScriptId, Box<dyn ScriptUnlocker>> = HashMap::new();
     unlockers.insert(sighash_script_id, Box::new(sighash_unlocker));
 
     // The witness for the simple-lock input is the wire-encoded preimage.
-    let witness_args = WitnessArgs::new_builder()
+    let simple_lock_witness = WitnessArgs::new_builder()
         .lock(Some(Bytes::from(wire)).pack())
         .build();
 
-    // Output: send the capacity back to the spender's own address.
+    // Output: return capacity to the spender's address
     let output = CellOutput::new_builder()
-        .capacity((61u64 * 100_000_000u64).pack()) // CapacityBalancer fills this in
+        .capacity((61u64 * 100_000_000u64).pack())
         .lock(spender_lock.clone())
         .build();
+
+    let mut cell_collector = DefaultCellCollector::new(&ckb_rpc);
 
     let placeholder_witness = WitnessArgs::new_builder()
         .lock(Some(Bytes::from(vec![0u8; 65])).pack())
         .build();
     let balancer = CapacityBalancer::new_simple(spender_lock, placeholder_witness, 1000);
 
+    // Step A: let the builder collect fee-payer inputs and balance the tx.
+    // build_unlocked also signs the secp256k1 inputs it collected.
     let builder = CapacityTransferBuilder::new(vec![(output, Bytes::new())]);
-
-    let (mut tx, _) = builder.build_unlocked(
+    let (balanced_tx, _) = builder.build_unlocked(
         &mut cell_collector,
         &cell_dep_resolver,
         &header_dep_resolver,
@@ -190,15 +192,50 @@ pub fn spend_simple_lock(mut args: impl Iterator<Item = String>) -> anyhow::Resu
         &unlockers,
     )?;
 
-    // Attach the real simple-lock witness.
-    // The SDK builds the tx with a placeholder witness for the secp256k1 input;
-    // we need to prepend our simple-lock witness for input index 0.
-    let witnesses: Vec<_> = std::iter::once(witness_args.as_bytes().pack())
-        .chain(tx.witnesses().into_iter().skip(1))
-        .collect();
-    tx = tx.as_advanced_builder().set_witnesses(witnesses).build();
+    // Step B: inject the locked cell as input[0] BEFORE signing.
+    // We must prepend it (+ its witness placeholder) and add the code cell dep,
+    // then re-sign the secp256k1 inputs so the signature covers the full tx.
+    let locked_cell_input = CellInput::new_builder()
+        .previous_output(locked_cell_outpoint)
+        .build();
 
-    let tx_hash = ckb_client.send_transaction(tx.data().into(), None)?;
+    // Prepend locked cell input and witness; append code cell dep.
+    // Secp256k1 witnesses shift by 1 — replace the placeholder at the new index.
+    let inputs: Vec<_> = std::iter::once(locked_cell_input)
+        .chain(balanced_tx.inputs().into_iter())
+        .collect();
+    // Prepend simple-lock witness at index 0; existing witnesses shift to 1..
+    let witnesses: Vec<_> = std::iter::once(simple_lock_witness.as_bytes().pack())
+        .chain(balanced_tx.witnesses().into_iter())
+        .collect();
+    let cell_deps: Vec<_> = balanced_tx
+        .cell_deps()
+        .into_iter()
+        .chain(std::iter::once(code_cell_dep))
+        .collect();
+
+    let unsigned_tx: TransactionView = balanced_tx
+        .as_advanced_builder()
+        .set_inputs(inputs)
+        .set_witnesses(witnesses)
+        .set_cell_deps(cell_deps)
+        .build();
+
+    // Step C: re-sign — the secp256k1 inputs are now at shifted indices,
+    // and the tx hash changed, so the old signatures are invalid.
+    let (signed_tx, _) = {
+        let secret_key2 =
+            SecretKey::from_byte_array(&spender_key)?;
+        let signer2 = SecpCkbRawKeySigner::new_with_secret_keys(vec![secret_key2]);
+        let sighash_unlocker2 = SecpSighashUnlocker::from(Box::new(signer2) as Box<_>);
+        let sighash_script_id2 = ScriptId::new_type(SIGHASH_TYPE_HASH.clone());
+        let mut unlockers2: HashMap<ScriptId, Box<dyn ScriptUnlocker>> = HashMap::new();
+        unlockers2.insert(sighash_script_id2, Box::new(sighash_unlocker2));
+
+        ckb_sdk::tx_builder::unlock_tx(unsigned_tx, &tx_dep_provider, &mut unlockers2)?
+    };
+
+    let tx_hash = ckb_client.send_transaction(signed_tx.data().into(), None)?;
     println!("Spend tx hash: {:#x}", tx_hash);
     println!("Cell spent successfully.");
 

@@ -11,6 +11,7 @@ fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|| "deploy-sudt".to_string());
 
     let args = std::env::args().skip(2);
+    let config = Config::from_env()?;
     match command.as_str() {
         "deploy-sudt" => {
             deploy_and_mint_sudt()?;
@@ -20,6 +21,9 @@ fn main() -> anyhow::Result<()> {
         }
         "spend-simple-lock" => {
             spend::spend_simple_lock(args)?;
+        }
+        "create-locked-cell" => {
+            deploy_script::create_locked_cell(args, &config)?;
         }
         other => anyhow::bail!("unknown command: {other}"),
     }

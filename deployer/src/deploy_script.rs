@@ -1,4 +1,4 @@
-use std::{collections::HashMap, str::FromStr};
+use std::{collections::HashMap, println, str::FromStr, vec};
 
 use ckb_hash::blake2b_256;
 use ckb_jsonrpc_types::Either;
@@ -14,11 +14,7 @@ use ckb_sdk::{
     unlock::{ScriptUnlocker, SecpSighashUnlocker},
 };
 use ckb_types::{
-    H256,
-    bytes::Bytes,
-    core::{DepType, ScriptHashType},
-    packed::{CellDep, CellOutput, OutPoint, Script, WitnessArgs},
-    prelude::{Builder, Entity, Pack, Unpack},
+    H256, bytes::Bytes, core::{DepType, ScriptHashType}, packed::{Bytes as PackedBytes, CellDep, CellOutput, OutPoint, Script, WitnessArgs}, prelude::{Builder, Entity, Pack, Unpack},
 };
 use secp256k1::SecretKey;
 use sha2::{Sha256, Digest};
@@ -399,6 +395,98 @@ pub fn transfer_tokens(
         "Transferred {} tokens to {}",
         transfer_amount, recipient_address
     );
+
+    Ok(())
+}
+
+pub fn create_locked_cell(mut args: impl Iterator<Item = String>, config: &crate::config::Config) -> anyhow::Result<()> {
+    let [string_code_cell_outpoint, preimage_hex] =
+        [args.next(), args.next()].map(|x| x.expect("Missing arg"));
+
+    let ckb_rpc = &config.ckb_rpc;
+    let funder_address = &config.address;
+    let funder_key = config.secret_key()?;
+
+    // Decode the code cell tx hash and build the OutPoint (index 0)
+    let bytes_code_cell_outpoint: [u8; 32] =
+        hex::decode(&string_code_cell_outpoint)?.try_into().unwrap();
+    let code_cell_outpoint = OutPoint::new(bytes_code_cell_outpoint.pack(), 0);
+
+    // Derive the lock args: blake2b_256(preimage_bytes)
+    // The simple-lock contract checks: blake2b_256(witness.preimage) == args
+    let preimage_bytes = hex::decode(&preimage_hex)?;
+    let lock_args_hash = blake2b_256(preimage_bytes.as_slice());
+
+    let ckb_client = CkbRpcClient::new(ckb_rpc);
+
+    // Get the code_hash of the deployed simple-lock binary from chain
+    let (code_hash_packed, _) = fetch_code_cell_data(&ckb_client, &code_cell_outpoint)?;
+
+    // Build the simple-lock script:
+    //   code_hash = hash of the deployed binary (+ IDL commitment)
+    //   hash_type = Data1
+    //   args      = blake2b_256(preimage) — 32 bytes
+    let simple_lock_script = Script::new_builder()
+        .code_hash(code_hash_packed)
+        .hash_type(ScriptHashType::Data1.into())
+        .args(Bytes::from(lock_args_hash.to_vec()).pack())
+        .build();
+
+    // Register the simple-lock code cell as a cell dep so the VM can load it
+    let code_cell_dep = CellDep::new_builder()
+        .out_point(code_cell_outpoint)
+        .dep_type(DepType::Code.into())
+        .build();
+
+    // The cell being created — locked by simple-lock, no data, 70 CKB capacity
+    let locked_cell_output = CellOutput::new_builder()
+        .capacity((70464 * 100_000_000).pack())
+        .lock(simple_lock_script.clone())
+        .build();
+
+    let funder_addr = Address::from_str(funder_address)
+        .map_err(|e| anyhow::anyhow!("invalid funder address: {e}"))?;
+    let funder_lock: Script = funder_addr.payload().into();
+
+    // Funding setup — the transaction pays from the funder's secp256k1 wallet
+    let signer = SecpCkbRawKeySigner::new_with_secret_keys(vec![funder_key]);
+    let sighash_unlocker = SecpSighashUnlocker::from(Box::new(signer) as Box<_>);
+    let sighash_script_id = ScriptId::new_type(SIGHASH_TYPE_HASH.clone());
+    let mut unlockers: HashMap<ScriptId, Box<dyn ScriptUnlocker>> = HashMap::new();
+    unlockers.insert(sighash_script_id, Box::new(sighash_unlocker));
+
+    let placeholder_witness = WitnessArgs::new_builder()
+        .lock(Some(Bytes::from(vec![0u8; 65])).pack())
+        .build();
+    let balancer = CapacityBalancer::new_simple(funder_lock, placeholder_witness, 1000);
+
+    let mut cell_collector = DefaultCellCollector::new(ckb_rpc);
+    let mut cell_dep_resolver = DefaultCellDepResolver::from_genesis(
+        &ckb_client.get_block_by_number(0.into())?.unwrap().into(),
+    )?;
+    // Register the simple-lock code dep so build_unlocked can resolve it
+    let simple_lock_script_id = ScriptId::new_data(simple_lock_script.calc_script_hash().unpack());
+    cell_dep_resolver.insert(simple_lock_script_id, code_cell_dep, "simple-lock".to_string());
+
+    let header_dep_resolver = DefaultHeaderDepResolver::new(ckb_rpc);
+    let tx_dep_provider = DefaultTransactionDependencyProvider::new(ckb_rpc, 10);
+
+    let builder = CapacityTransferBuilder::new(vec![(locked_cell_output, Bytes::new())]);
+
+    let (tx, _) = builder.build_unlocked(
+        &mut cell_collector,
+        &cell_dep_resolver,
+        &header_dep_resolver,
+        &tx_dep_provider,
+        &balancer,
+        &unlockers,
+    )?;
+
+    let tx_hash = ckb_client.send_transaction(tx.data().into(), None)?;
+    println!("Locked cell created.");
+    println!("Outpoint: {:#x}:0x0", tx_hash);
+    println!("Lock args (preimage hash): {}", hex::encode(lock_args_hash));
+    println!("Preimage hex (needed for spend): {preimage_hex}");
 
     Ok(())
 }
