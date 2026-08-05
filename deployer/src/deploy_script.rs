@@ -14,10 +14,14 @@ use ckb_sdk::{
     unlock::{ScriptUnlocker, SecpSighashUnlocker},
 };
 use ckb_types::{
-    H256, bytes::Bytes, core::{DepType, ScriptHashType}, packed::{Bytes as PackedBytes, CellDep, CellOutput, OutPoint, Script, WitnessArgs}, prelude::{Builder, Entity, Pack, Unpack},
+    H256,
+    bytes::Bytes,
+    core::{DepType, ScriptHashType},
+    packed::{Bytes as PackedBytes, CellDep, CellOutput, OutPoint, Script, WitnessArgs},
+    prelude::{Builder, Entity, Pack, Unpack},
 };
 use secp256k1::SecretKey;
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 
 // pub const TESTNET_RPC: &str = "https://testnet.ckb.dev";
 
@@ -399,7 +403,10 @@ pub fn transfer_tokens(
     Ok(())
 }
 
-pub fn create_locked_cell(mut args: impl Iterator<Item = String>, config: &crate::config::Config) -> anyhow::Result<()> {
+pub fn create_locked_cell(
+    mut args: impl Iterator<Item = String>,
+    config: &crate::config::Config,
+) -> anyhow::Result<()> {
     let [string_code_cell_outpoint, preimage_hex] =
         [args.next(), args.next()].map(|x| x.expect("Missing arg"));
 
@@ -466,7 +473,11 @@ pub fn create_locked_cell(mut args: impl Iterator<Item = String>, config: &crate
     )?;
     // Register the simple-lock code dep so build_unlocked can resolve it
     let simple_lock_script_id = ScriptId::new_data(simple_lock_script.calc_script_hash().unpack());
-    cell_dep_resolver.insert(simple_lock_script_id, code_cell_dep, "simple-lock".to_string());
+    cell_dep_resolver.insert(
+        simple_lock_script_id,
+        code_cell_dep,
+        "simple-lock".to_string(),
+    );
 
     let header_dep_resolver = DefaultHeaderDepResolver::new(ckb_rpc);
     let tx_dep_provider = DefaultTransactionDependencyProvider::new(ckb_rpc, 10);

@@ -65,8 +65,12 @@ pub fn spend_simple_lock(mut args: impl Iterator<Item = String>) -> anyhow::Resu
         private_key_bytes: spender_key,
     } = cfg;
 
-    let [string_code_cell_outpoint, string_preimage, string_idl_path, string_locked_cell_outpoint] =
-        [args.next(), args.next(), args.next(), args.next()].map(|x| x.expect("Missing arg"));
+    let [
+        string_code_cell_outpoint,
+        string_preimage,
+        string_idl_path,
+        string_locked_cell_outpoint,
+    ] = [args.next(), args.next(), args.next(), args.next()].map(|x| x.expect("Missing arg"));
 
     let idl_path = string_idl_path.as_str();
     let bytes_code_cell_outpoint: [u8; 32] =
@@ -77,8 +81,9 @@ pub fn spend_simple_lock(mut args: impl Iterator<Item = String>) -> anyhow::Resu
     let code_cell_outpoint = OutPoint::new(packed_code_cell_outpoint, 0);
 
     // The locked cell — the one actually being spent
-    let bytes_locked_cell: [u8; 32] =
-        hex::decode(string_locked_cell_outpoint)?.try_into().unwrap();
+    let bytes_locked_cell: [u8; 32] = hex::decode(string_locked_cell_outpoint)?
+        .try_into()
+        .unwrap();
     let locked_cell_outpoint = OutPoint::new(bytes_locked_cell.pack(), 0);
 
     let ckb_client = CkbRpcClient::new(&ckb_rpc);
@@ -149,7 +154,11 @@ pub fn spend_simple_lock(mut args: impl Iterator<Item = String>) -> anyhow::Resu
         .args(Bytes::from(blake2b_256(preimage).to_vec()).pack())
         .build();
     let simple_lock_script_id = ScriptId::new_data(simple_lock_script.calc_script_hash().unpack());
-    cell_dep_resolver.insert(simple_lock_script_id, code_cell_dep.clone(), "simple-lock".to_string());
+    cell_dep_resolver.insert(
+        simple_lock_script_id,
+        code_cell_dep.clone(),
+        "simple-lock".to_string(),
+    );
 
     let header_dep_resolver = DefaultHeaderDepResolver::new(&ckb_rpc);
     let tx_dep_provider = DefaultTransactionDependencyProvider::new(&ckb_rpc, 10);
@@ -224,8 +233,7 @@ pub fn spend_simple_lock(mut args: impl Iterator<Item = String>) -> anyhow::Resu
     // Step C: re-sign — the secp256k1 inputs are now at shifted indices,
     // and the tx hash changed, so the old signatures are invalid.
     let (signed_tx, _) = {
-        let secret_key2 =
-            SecretKey::from_byte_array(&spender_key)?;
+        let secret_key2 = SecretKey::from_byte_array(&spender_key)?;
         let signer2 = SecpCkbRawKeySigner::new_with_secret_keys(vec![secret_key2]);
         let sighash_unlocker2 = SecpSighashUnlocker::from(Box::new(signer2) as Box<_>);
         let sighash_script_id2 = ScriptId::new_type(SIGHASH_TYPE_HASH.clone());
