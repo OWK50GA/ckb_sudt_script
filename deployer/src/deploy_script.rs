@@ -1,4 +1,4 @@
-use std::{collections::HashMap, str::FromStr};
+use std::{collections::HashMap, println, str::FromStr, vec};
 
 use ckb_hash::blake2b_256;
 use ckb_jsonrpc_types::Either;
@@ -21,18 +21,46 @@ use ckb_types::{
     prelude::{Builder, Entity, Pack, Unpack},
 };
 use secp256k1::SecretKey;
+use sha2::{Digest, Sha256};
 
 // pub const TESTNET_RPC: &str = "https://testnet.ckb.dev";
+
+fn sha256(data: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    hasher.finalize().into()
+}
 
 pub fn deploy_script(
     ckb_rpc: &str,
     deployer_address: &str,
     sender_key: SecretKey,
     script_path: &str,
+    idl_path: Option<&str>,
 ) -> anyhow::Result<OutPoint> {
-    let script_binary = std::fs::read(script_path)?;
-    let script_size = script_binary.len();
+    let mut script_binary = std::fs::read(script_path)?;
+    let mut idl_hash: Vec<u8> = Vec::new();
 
+    if let Some(path) = idl_path {
+        let idl_json_bytes = std::fs::read(path)?;
+        let hash = sha256(&idl_json_bytes);
+        idl_hash.extend_from_slice(&hash);
+
+        // Freeze the exact IDL bytes that were committed
+        // Named after the script binary so it is unambiguous
+        let script_name = std::path::Path::new(script_path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("script");
+        let frozen_path = format!("{script_name}-idl.deployed.json");
+        std::fs::write(&frozen_path, &idl_json_bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to write frozen IDL to {frozen_path}: {e}"))?;
+        println!("Frozen IDL written to: {frozen_path}");
+    }
+
+    script_binary.extend_from_slice(&idl_hash);
+
+    let script_size = script_binary.len();
     let required_capacity = (script_size as u64 + 100) * 100_000_000;
 
     println!("Script size: {script_size} bytes");
@@ -174,6 +202,16 @@ pub fn compute_code_hash(
     ckb_client: &CkbRpcClient,
     code_cell_outpoint: &OutPoint,
 ) -> anyhow::Result<ckb_types::packed::Byte32> {
+    let (hash, _) = fetch_code_cell_data(ckb_client, code_cell_outpoint)?;
+    Ok(hash)
+}
+
+/// Fetch the raw cell data and its blake2b-256 hash for a deployed code cell.
+/// Returns (code_hash, raw_cell_data_bytes).
+pub fn fetch_code_cell_data(
+    ckb_client: &CkbRpcClient,
+    code_cell_outpoint: &OutPoint,
+) -> anyhow::Result<(ckb_types::packed::Byte32, Vec<u8>)> {
     let tx_hash = code_cell_outpoint.tx_hash();
     let index: u32 = code_cell_outpoint.index().unpack();
 
@@ -183,9 +221,6 @@ pub fn compute_code_hash(
         .transaction
         .expect("tx data missing");
 
-    // ResponseFormat<TransactionView> wraps Either<TransactionView, JsonBytes>.
-    // The RPC default returns hex/molecule bytes (Either::Right).
-    // We handle both variants.
     let packed_tx = match tx.inner {
         Either::Left(json_tx) => {
             let packed: ckb_types::packed::Transaction = json_tx.inner.into();
@@ -201,8 +236,10 @@ pub fn compute_code_hash(
         .get(index as usize)
         .expect("output data missing");
     let raw: Bytes = data.unpack();
+    let raw_vec = raw.to_vec();
+    let code_hash = blake2b_256(raw.as_ref()).pack();
 
-    Ok(blake2b_256(raw.as_ref()).pack())
+    Ok((code_hash, raw_vec))
 }
 
 #[allow(unused)]
@@ -361,4 +398,163 @@ pub fn transfer_tokens(
     );
 
     Ok(())
+}
+
+pub fn create_locked_cell(
+    mut args: impl Iterator<Item = String>,
+    config: &crate::config::Config,
+) -> anyhow::Result<()> {
+    let [string_code_cell_outpoint, preimage_hex] =
+        [args.next(), args.next()].map(|x| x.expect("Missing arg"));
+
+    let preimage_bytes = hex::decode(&preimage_hex)?;
+    // simple-lock args = blake2b_256(preimage) — 32 bytes
+    let lock_args = blake2b_256(preimage_bytes.as_slice()).to_vec();
+
+    let outpoint = create_locked_cell_generic(
+        &config.ckb_rpc,
+        &config.address,
+        config.secret_key()?,
+        &string_code_cell_outpoint,
+        lock_args.clone(),
+        70464,
+        "simple-lock",
+    )?;
+
+    println!("Locked cell created.");
+    println!("Outpoint: {:#x}:0x0", outpoint.tx_hash());
+    println!("Lock args (preimage hash): {}", hex::encode(&lock_args));
+    println!("Preimage hex (needed for spend): {preimage_hex}");
+
+    Ok(())
+}
+
+/// Create a cell locked by the timelock-lock script.
+///
+/// Args (positional):
+///   <code_cell_tx_hash>  hex tx hash of the deployed timelock-lock code cell
+///   <pubkey_hex>         33-byte compressed secp256k1 public key in hex
+///   <extra_commitment>   32-byte hex commitment for extra payload, or "" for zeros
+pub fn create_timelock_cell(
+    mut args: impl Iterator<Item = String>,
+    config: &crate::config::Config,
+) -> anyhow::Result<()> {
+    let [string_code_cell_outpoint, pubkey_hex, extra_commitment_hex] =
+        [args.next(), args.next(), args.next()].map(|x| x.expect("Missing arg"));
+
+    // timelock-lock args layout: [pubkey (33 bytes)][commitment (32 bytes)]
+    let pubkey_bytes = hex::decode(&pubkey_hex)?;
+    if pubkey_bytes.len() != 33 {
+        anyhow::bail!(
+            "pubkey must be 33 bytes (compressed secp256k1), got {}",
+            pubkey_bytes.len()
+        );
+    }
+
+    let commitment_bytes = if extra_commitment_hex.is_empty() {
+        vec![0u8; 32]
+    } else {
+        let b = hex::decode(&extra_commitment_hex)?;
+        if b.len() != 32 {
+            anyhow::bail!("extra_commitment must be 32 bytes, got {}", b.len());
+        }
+        b
+    };
+
+    let mut lock_args = Vec::with_capacity(65);
+    lock_args.extend_from_slice(&pubkey_bytes);
+    lock_args.extend_from_slice(&commitment_bytes);
+
+    let outpoint = create_locked_cell_generic(
+        &config.ckb_rpc,
+        &config.address,
+        config.secret_key()?,
+        &string_code_cell_outpoint,
+        lock_args,
+        70464,
+        "timelock-lock",
+    )?;
+
+    println!("Timelock cell created.");
+    println!("Outpoint: {:#x}:0x0", outpoint.tx_hash());
+    println!("Pubkey: {pubkey_hex}");
+    println!("Extra commitment: {extra_commitment_hex}");
+
+    Ok(())
+}
+
+/// Generic cell creation: deploys a cell locked by any script with pre-built args.
+///
+/// - `code_cell_tx_hash_hex`: hex string of the code cell's transaction hash
+/// - `lock_args`: the raw args bytes for the lock script
+/// - `capacity_ckb`: the capacity to lock in the cell (in CKB, not shannons)
+/// - `script_label`: a human-readable label used in logging
+pub fn create_locked_cell_generic(
+    ckb_rpc: &str,
+    funder_address: &str,
+    funder_key: SecretKey,
+    code_cell_tx_hash_hex: &str,
+    lock_args: Vec<u8>,
+    capacity_ckb: u64,
+    script_label: &str,
+) -> anyhow::Result<OutPoint> {
+    let bytes_code: [u8; 32] = hex::decode(code_cell_tx_hash_hex)?.try_into().unwrap();
+    let code_cell_outpoint = OutPoint::new(bytes_code.pack(), 0);
+
+    let ckb_client = CkbRpcClient::new(ckb_rpc);
+    let (code_hash_packed, _) = fetch_code_cell_data(&ckb_client, &code_cell_outpoint)?;
+
+    let lock_script = Script::new_builder()
+        .code_hash(code_hash_packed)
+        .hash_type(ScriptHashType::Data1.into())
+        .args(Bytes::from(lock_args).pack())
+        .build();
+
+    let code_cell_dep = CellDep::new_builder()
+        .out_point(code_cell_outpoint)
+        .dep_type(DepType::Code.into())
+        .build();
+
+    let locked_cell_output = CellOutput::new_builder()
+        .capacity((capacity_ckb * 100_000_000).pack())
+        .lock(lock_script.clone())
+        .build();
+
+    let funder_addr = Address::from_str(funder_address)
+        .map_err(|e| anyhow::anyhow!("invalid funder address: {e}"))?;
+    let funder_lock: Script = funder_addr.payload().into();
+
+    let signer = SecpCkbRawKeySigner::new_with_secret_keys(vec![funder_key]);
+    let sighash_unlocker = SecpSighashUnlocker::from(Box::new(signer) as Box<_>);
+    let sighash_script_id = ScriptId::new_type(SIGHASH_TYPE_HASH.clone());
+    let mut unlockers: HashMap<ScriptId, Box<dyn ScriptUnlocker>> = HashMap::new();
+    unlockers.insert(sighash_script_id, Box::new(sighash_unlocker));
+
+    let placeholder_witness = WitnessArgs::new_builder()
+        .lock(Some(Bytes::from(vec![0u8; 65])).pack())
+        .build();
+    let balancer = CapacityBalancer::new_simple(funder_lock, placeholder_witness, 1000);
+
+    let mut cell_collector = DefaultCellCollector::new(ckb_rpc);
+    let mut cell_dep_resolver = DefaultCellDepResolver::from_genesis(
+        &ckb_client.get_block_by_number(0.into())?.unwrap().into(),
+    )?;
+    let script_id = ScriptId::new_data(lock_script.calc_script_hash().unpack());
+    cell_dep_resolver.insert(script_id, code_cell_dep, script_label.to_string());
+
+    let header_dep_resolver = DefaultHeaderDepResolver::new(ckb_rpc);
+    let tx_dep_provider = DefaultTransactionDependencyProvider::new(ckb_rpc, 10);
+
+    let builder = CapacityTransferBuilder::new(vec![(locked_cell_output, Bytes::new())]);
+    let (tx, _) = builder.build_unlocked(
+        &mut cell_collector,
+        &cell_dep_resolver,
+        &header_dep_resolver,
+        &tx_dep_provider,
+        &balancer,
+        &unlockers,
+    )?;
+
+    let tx_hash = ckb_client.send_transaction(tx.data().into(), None)?;
+    Ok(OutPoint::new(tx_hash.pack(), 0))
 }

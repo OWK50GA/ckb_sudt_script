@@ -1,160 +1,232 @@
-# CKB sUDT
+# ckb-lock-script
 
-A Simple User Defined Token (sUDT) implementation on Nervos CKB, written in Rust. Includes the on-chain type script, a test suite, and an off-chain deployer binary.
+A research workspace demonstrating the CKB IDL system — a convention for CKB lock scripts to publish a machine-readable interface description alongside their deployed binary, enabling wallets and tooling to validate witness encoding before submitting transactions.
 
-## What is sUDT?
+The workspace contains two IDL-enabled lock scripts, a sUDT type script, a deployer binary, and an integration test suite.
 
-sUDT is CKB's standard for fungible tokens. Unlike ERC-20, there is no global contract — each token is identified by its **type script**, and token amounts live in the **data field** of individual cells. The type script enforces conservation: you cannot create tokens out of thin air unless you are the designated owner.
+---
 
-## Project Structure
+## What is the IDL system?
+
+CKB lock scripts receive their spending conditions through a raw byte buffer (`WitnessArgs.lock`). Without external documentation, wallets and tooling cannot know what the script expects — they must either have hard-coded knowledge or guess.
+
+The IDL system solves this by:
+
+1. **Script authors** annotate their witness struct with `#[derive(CkbWitness)]` ([`ckb-idl-derive`](https://github.com/OWK50GA/ckb-idl-derive)), which generates an `idl.json` describing the fields.
+2. **At deployment**, the deployer appends `sha256(idl.json)` to the code cell data, creating an on-chain commitment.
+3. **At spend time**, a client library ([`ckb-idl-client`](https://github.com/OWK50GA/ckb-idl-client)) verifies the local IDL matches the commitment, then structurally validates the proposed witness before submitting the transaction.
+
+This catches malformed witness encodings client-side — before the VM returns an opaque error code.
+
+---
+
+## Workspace contents
 
 ```
 .
 ├── contracts/
-│   └── ckb_sudt_script/       # The on-chain type script (RISC-V, no_std)
-│       └── src/
-│           ├── main.rs        # Core sUDT logic
-│           └── error.rs       # Error codes
-├── deployer/                  # Off-chain tooling (std Rust, runs on your machine)
+│   ├── simple-lock/        # Preimage hash lock (one witness field: bytes)
+│   ├── timelock-lock/      # Timelock + secp256k1 lock (three witness fields)
+│   └── ckb_sudt_script/    # Standard sUDT type script (no IDL)
+├── deployer/               # Off-chain CLI: deploy, create locked cells, spend
 │   └── src/
-│       ├── main.rs            # Deploy + mint entry point
-│       ├── config.rs          # .env loader
-│       ├── deploy_script.rs   # deploy_script / mint_tokens / transfer_tokens
-│       └── bin/
-│           └── keygen.rs      # One-time key + address generator
-└── tests/                     # Integration tests using ckb-testtool
+│       ├── main.rs         # Command dispatch
+│       ├── config.rs       # .env loader
+│       ├── deploy_script.rs # Generic deploy + cell creation
+│       ├── spend.rs         # Generic + script-specific spend logic
+│       └── bin/keygen.rs   # One-time key + address generator
+└── tests/                  # Integration tests using ckb-testtool
     └── src/
-        └── tests.rs
+        ├── simple_lock_tests.rs
+        └── timelock_lock_tests.rs
 ```
 
-## How the sUDT Script Works
+---
 
-The type script is identified by a `code_hash` (blake2b-256 of the binary) and carries a single argument: the **owner lock hash** — a 32-byte blake2b-256 hash of the issuer's lock script.
+## The scripts
 
-On every transaction involving sUDT cells, the script runs and enforces one of two modes:
+### simple-lock
 
-**Normal mode** (anyone transferring tokens):
-- Sum all input amounts across cells sharing this type script
-- Sum all output amounts
-- Reject if `output_sum > input_sum` (no inflation)
-- Burning (output < input) is allowed
+A lock cell that can be spent by anyone who knows the preimage of a blake2b-256 hash stored in the script args.
 
-**Owner mode** (the issuer minting or burning):
-- Triggered when any input cell has a **type script whose hash equals the owner lock hash**
-- All conservation checks are skipped — the owner can mint freely
+Witness (one field):
+```json
+[{ "name": "preimage", "type": "bytes", "required": true }]
+```
 
-Token amounts are stored as **16-byte little-endian `u128`** at the start of each cell's data field.
+The script checks: `blake2b_256(witness.preimage) == args`.
 
-### Error Codes
+### timelock-lock
 
-| Code | Name | Meaning |
-|------|------|---------|
-| 4 | Encoding | Cell data < 16 bytes, cannot decode amount |
-| 10 | ArgsLength | Script args are not exactly 32 bytes |
-| 11 | Overflow | Token sum overflowed u128 |
-| 12 | OutputOverflow | Output tokens exceed input tokens |
+A lock cell that can only be spent after a given timestamp, by someone who holds the corresponding private key. An optional extra payload with a hash commitment is also supported.
+
+Args layout (65 bytes):
+- `[0..33]` — compressed secp256k1 public key
+- `[33..65]` — blake2b-256 commitment of expected `extra` payload (all zeros = skip)
+
+Witness (three fields):
+```json
+[
+  { "name": "signature",       "type": "secp256k1_sig", "required": true  },
+  { "name": "unlock_after_ms", "type": "uint64",        "required": true  },
+  { "name": "extra",           "type": "bytes",         "required": false }
+]
+```
+
+### ckb_sudt_script
+
+Standard sUDT type script. No IDL — it does not use the witness. Token amounts are stored as 16-byte LE `u128` in cell data.
+
+---
+
+## Deployer CLI
+
+The deployer binary provides seven commands. All read `PRIVATE_KEY`, `TESTNET_ADDRESS`, and `CKB_RPC` from `.env`.
+
+```
+deploy-simple-lock
+    Deploys the simple-lock binary with IDL commitment appended.
+    Outputs: code cell tx hash
+
+create-locked-cell <code_tx_hash> <preimage_hex>
+    Creates a cell locked by simple-lock with blake2b_256(preimage) as args.
+    Outputs: locked cell tx hash
+
+spend-simple-lock <code_tx_hash> <preimage_hex> <idl_path> <locked_tx_hash>
+    Verifies IDL, validates witness, spends the simple-lock cell.
+
+deploy-timelock-lock
+    Deploys the timelock-lock binary with IDL commitment appended.
+    Outputs: code cell tx hash
+
+create-timelock-cell <code_tx_hash> <pubkey_hex> <commitment_hex|"">
+    Creates a cell locked by timelock-lock.
+    pubkey_hex: 33-byte compressed secp256k1 pubkey
+    commitment_hex: 32-byte blake2b hash of expected extra payload, or "" for no commitment
+
+spend-timelock-lock <code_tx_hash> <signing_key_hex> <unlock_after_ms> <extra_hex|""> <idl_path> <locked_tx_hash>
+    Verifies IDL, validates witness, signs the transaction, spends the timelock cell.
+
+deploy-sudt
+    Deploys the sUDT type script and mints 1,000,000 tokens to the deployer address.
+```
+
+---
+
+## Full round-trip: simple-lock
+
+```bash
+# 1. Generate a keypair (once)
+cargo run --bin keygen
+# → paste PRIVATE_KEY, TESTNET_ADDRESS, CKB_RPC into .env
+# → fund the address at https://faucet.nervos.org
+
+# 2. Deploy simple-lock
+cargo run --bin deployer -- deploy-simple-lock
+# → save the code cell tx hash
+
+# 3. Create a locked cell (preimage = "hello" = 68656c6c6f)
+cargo run --bin deployer -- create-locked-cell <code_tx_hash> 68656c6c6f
+# → save the locked cell tx hash
+
+# 4. Spend the locked cell
+cargo run --bin deployer -- spend-simple-lock \
+  <code_tx_hash> \
+  68656c6c6f \
+  ./simple-lock-idl.deployed.json \
+  <locked_tx_hash>
+```
+
+Expected output for step 4:
+```
+code_hash: d300d5a3...
+IDL commitment verified — IDL is authentic.
+Witness structurally valid. Decoded fields:
+  preimage (bytes): Bytes([104, 101, 108, 108, 111])
+Spend tx hash: 0xe713e2a5...
+Cell spent successfully.
+```
+
+---
 
 ## Prerequisites
 
 ```bash
-# Install the RISC-V target for the on-chain contract
+# RISC-V target for the on-chain contracts
 rustup target add riscv64imac-unknown-none-elf
 
-# Clang is required to compile C dependencies (ckb-std uses it)
-# On Ubuntu/Debian:
-sudo apt install clang
-# On macOS (Homebrew):
+# Clang for C dependencies used by ckb-std
+# Ubuntu/Debian:
+sudo apt install clang llvm
+# macOS:
 brew install llvm
 ```
 
-## Building the Contract
+---
+
+## Building
 
 ```bash
+# Build all contract binaries
 make build
+# → places binaries in build/release/
+
+# Build the deployer
+cargo build -p deployer
 ```
 
-The compiled binary is placed at `build/release/ckb_sudt_script`.
+---
 
-## Running Tests
+## Testing
 
-Tests run against the compiled binary using `ckb-testtool`, which simulates the CKB VM locally.
+The test suite uses `ckb-testtool` to run the RISC-V contracts in a sandboxed VM locally — no testnet required.
 
 ```bash
-# Build the contract first, then run tests
+# Build contracts first
 make build
+
+# Run integration tests
 cargo test --package tests
 ```
 
-The test suite covers:
+The tests cover both the PSCT boundary (structural validation only, no VM) and full VM execution paths including every error code.
 
-- Equal-amount transfer (pass)
-- Burning tokens — output < input (pass)
-- Owner mode minting via governance cell (pass)
-- Multi-cell balanced transfer (pass)
-- Inflation attack — output > input (fail, error 12)
-- Invalid args length (fail, error 10)
-- Malformed cell data < 16 bytes (fail, error 4)
+---
 
-## Deploying to Testnet
+## CI
 
-### 1. Generate a key and address
+GitHub Actions runs four jobs on every push and PR:
 
-Run this once and save the output securely:
+| Job | Rust version | What it does |
+|-----|-------------|--------------|
+| `check` | 1.95.0 | `cargo fmt --check`, `cargo check`, `cargo clippy -D warnings` |
+| `build-contracts` | 1.95.0 + RISC-V target | `make build`, uploads binaries as artifacts |
+| `test` | 1.95.0 | Downloads artifacts, runs `cargo test --package tests` |
+| `build-deployer` | 1.95.0 | `cargo build -p deployer` |
 
-```bash
-cargo run --bin keygen
+---
+
+## External dependencies
+
+Both `ckb-idl-derive` and `ckb-idl-client` are referenced as git dependencies from GitHub. Local `path =` references break CI because the runner only checks out this repository.
+
+```toml
+# contracts/simple-lock/Cargo.toml
+ckb-idl-derive = { git = "https://github.com/OWK50GA/ckb-idl-derive", branch = "refactor/out-dir" }
+
+# deployer/Cargo.toml and tests/Cargo.toml
+ckb-idl-client = { git = "https://github.com/OWK50GA/ckb-idl-client", branch = "feat/verify" }
 ```
 
-Output:
-```
-PRIVATE_KEY=0xabc123...
-TESTNET_ADDRESS=ckt1qz...
-MAINNET_ADDRESS=ckb1qz...
+---
 
-Fund your testnet address at:
-https://faucet.nervos.org/?address=ckt1qz...
-```
+## Workspace version notes
 
-### 2. Create a `.env` file at the workspace root
-
-```bash
-PRIVATE_KEY=0xabc123...
-TESTNET_ADDRESS=ckt1qz...
-CKB_RPC=https://testnet.ckb.dev:8114
-```
-
-**Never commit this file.** It is already in `.gitignore`.
-
-### 3. Fund your address
-
-Visit the faucet URL printed by `keygen` and request testnet CKB. Wait for the transaction to confirm (usually under a minute).
-
-### 4. Deploy and mint
-
-```bash
-cargo run --bin deployer
-```
-
-This will:
-1. Deploy the `ckb_sudt_script` binary as a code cell on testnet
-2. Print the code cell outpoint — **save this**, you need it to reference the script later
-3. Mint 1,000,000 tokens to your own address
-
-## Key Design Notes
-
-**Scripts are cells.** There is no special "contract account". The compiled RISC-V binary is stored in the `data` field of an ordinary cell. Other cells reference it by `code_hash` (a hash of that data).
-
-**The deployer does not add `secp256k1` as a direct dependency.** It uses the version re-exported transitively through `ckb-sdk` to avoid type mismatches from duplicate crate versions in the dependency graph.
-
-**`ckb-hash` is not used in the contract.** It pulls in `blake2b-rs` which requires a C compiler for cross-compilation to RISC-V. The contract reads a pre-computed hash from its args instead. If you need to hash inside a script, use `blake2b-ref` (pure Rust).
-
-## Workspace Crate Versions
-
-The CKB ecosystem has two active version series that are not compatible with each other in the same dependency graph:
+Two incompatible CKB version series coexist in this workspace:
 
 | Series | Used by |
 |--------|---------|
-| `ckb-*` `1.x` / `ckb-types 1.1` | `ckb-testtool 1.1`, `ckb-std 1.1` |
-| `ckb-*` `0.202.x` | `ckb-sdk 4.x` |
+| `ckb-*` `1.x` | `ckb-testtool 1.1`, `ckb-std 1.1` (tests, contracts) |
+| `ckb-*` `0.202.x` | `ckb-sdk 4.x` (deployer) |
 
-The `tests` crate uses the `1.x` series. The `deployer` crate uses `0.202.x`. They coexist in this workspace because they do not share any crates that have exact-version pins in common — except `ckb-vm`, which is why `ckb-sdk 3.x` cannot be used here (it pins `ckb-vm = 0.24.13` while `ckb-testtool 1.1` pins `ckb-vm = 0.24.14`).
+They do not conflict because neither series pins `ckb-vm` at a version the other requires. `ckb-sdk 3.x` cannot be used here — it pins `ckb-vm = 0.24.13` while `ckb-testtool 1.1` requires `0.24.14`.

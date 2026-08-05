@@ -14,6 +14,12 @@ use std::str::FromStr;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod simple_lock_tests;
+
+#[cfg(test)]
+mod timelock_lock_tests;
+
 // The exact same Loader code from capsule's template, except that
 // now we use MODE as the environment variable
 const TEST_ENV_VAR: &str = "MODE";
