@@ -14,7 +14,7 @@ path = "src/bin/keygen.rs"
 [dependencies]
 ckb-sdk = "4.4"
 ckb-types = "0.202"
-ckb-idl-client = { path = "../../ckb-idl-client" }
+ckb-idl-client = { git = "https://github.com/OWK50GA/ckb-idl-client", branch = "feat/verify" }
 ckb-hash = "0.202"
 ckb-jsonrpc-types = "0.202"
 serde_json = "1"

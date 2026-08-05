@@ -126,17 +126,17 @@ pub fn spend_locked_cell(
         .build();
 
     let inputs: Vec<_> = std::iter::once(locked_input)
-        .chain(balanced_tx.inputs().into_iter())
+        .chain(balanced_tx.inputs())
         .collect();
     let witnesses: Vec<_> = std::iter::once(locked_witness.as_bytes().pack())
-        .chain(balanced_tx.witnesses().into_iter())
+        .chain(balanced_tx.witnesses())
         .collect();
     // Append code dep + any script-specific extra deps
     let cell_deps: Vec<_> = balanced_tx
         .cell_deps()
         .into_iter()
         .chain(std::iter::once(code_cell_dep))
-        .chain(extra_cell_deps.into_iter())
+        .chain(extra_cell_deps)
         .collect();
 
     let unsigned_tx: TransactionView = balanced_tx
@@ -155,7 +155,7 @@ pub fn spend_locked_cell(
         let sighash_script_id2 = ScriptId::new_type(SIGHASH_TYPE_HASH.clone());
         let mut unlockers2: HashMap<ScriptId, Box<dyn ScriptUnlocker>> = HashMap::new();
         unlockers2.insert(sighash_script_id2, Box::new(sighash_unlocker2));
-        ckb_sdk::tx_builder::unlock_tx(unsigned_tx, &tx_dep_provider, &mut unlockers2)?
+        ckb_sdk::tx_builder::unlock_tx(unsigned_tx, &tx_dep_provider, &unlockers2)?
     };
 
     let tx_hash = ckb_client.send_transaction(signed_tx.data().into(), None)?;
@@ -399,7 +399,7 @@ pub fn spend_timelock_lock(mut args: impl Iterator<Item = String>) -> anyhow::Re
     let pubkey_compressed = pubkey.serialize(); // 33 bytes
 
     // Derive lock args from the signing key's public key
-    let lock_args_hash = blake2b_256(&pubkey_compressed);
+    let lock_args_hash = blake2b_256(pubkey_compressed);
 
     // We need to sign the tx hash.  Build a temporary tx to get the hash, then
     // sign it and rebuild with the real signature.
@@ -477,10 +477,10 @@ pub fn spend_timelock_lock(mut args: impl Iterator<Item = String>) -> anyhow::Re
             .build();
 
         let inputs: Vec<_> = std::iter::once(locked_input)
-            .chain(balanced_tx.inputs().into_iter())
+            .chain(balanced_tx.inputs())
             .collect();
         let witnesses: Vec<_> = std::iter::once(placeholder_locked_witness.as_bytes().pack())
-            .chain(balanced_tx.witnesses().into_iter())
+            .chain(balanced_tx.witnesses())
             .collect();
         let cell_deps: Vec<_> = balanced_tx
             .cell_deps()

@@ -531,6 +531,7 @@ dependencies = [
 [[package]]
 name = "ckb-idl-client"
 version = "0.1.0"
+source = "git+https://github.com/OWK50GA/ckb-idl-client?branch=feat%2Fverify#8e1fcdb3f954dd6d361c0aaa8c8502dcec148180"
 dependencies = [
  "blake2b_simd",
  "hex",

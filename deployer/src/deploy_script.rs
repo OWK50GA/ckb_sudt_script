@@ -41,24 +41,21 @@ pub fn deploy_script(
     let mut script_binary = std::fs::read(script_path)?;
     let mut idl_hash: Vec<u8> = Vec::new();
 
-    match idl_path {
-        Some(path) => {
-            let idl_json_bytes = std::fs::read(path)?;
-            let hash = sha256(&idl_json_bytes);
-            idl_hash.extend_from_slice(&hash);
+    if let Some(path) = idl_path {
+        let idl_json_bytes = std::fs::read(path)?;
+        let hash = sha256(&idl_json_bytes);
+        idl_hash.extend_from_slice(&hash);
 
-            // Freeze the exact IDL bytes that were committed
-            // Named after the script binary so it is unambiguous
-            let script_name = std::path::Path::new(script_path)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("script");
-            let frozen_path = format!("{script_name}-idl.deployed.json");
-            std::fs::write(&frozen_path, &idl_json_bytes)
-                .map_err(|e| anyhow::anyhow!("Failed to write frozen IDL to {frozen_path}: {e}"))?;
-            println!("Frozen IDL written to: {frozen_path}");
-        }
-        None => {}
+        // Freeze the exact IDL bytes that were committed
+        // Named after the script binary so it is unambiguous
+        let script_name = std::path::Path::new(script_path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("script");
+        let frozen_path = format!("{script_name}-idl.deployed.json");
+        std::fs::write(&frozen_path, &idl_json_bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to write frozen IDL to {frozen_path}: {e}"))?;
+        println!("Frozen IDL written to: {frozen_path}");
     }
 
     script_binary.extend_from_slice(&idl_hash);
