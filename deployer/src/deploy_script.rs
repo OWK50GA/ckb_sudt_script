@@ -17,7 +17,7 @@ use ckb_types::{
     H256,
     bytes::Bytes,
     core::{DepType, ScriptHashType},
-    packed::{Bytes as PackedBytes, CellDep, CellOutput, OutPoint, Script, WitnessArgs},
+    packed::{CellDep, CellOutput, OutPoint, Script, WitnessArgs},
     prelude::{Builder, Entity, Pack, Unpack},
 };
 use secp256k1::SecretKey;
@@ -410,52 +410,123 @@ pub fn create_locked_cell(
     let [string_code_cell_outpoint, preimage_hex] =
         [args.next(), args.next()].map(|x| x.expect("Missing arg"));
 
-    let ckb_rpc = &config.ckb_rpc;
-    let funder_address = &config.address;
-    let funder_key = config.secret_key()?;
-
-    // Decode the code cell tx hash and build the OutPoint (index 0)
-    let bytes_code_cell_outpoint: [u8; 32] =
-        hex::decode(&string_code_cell_outpoint)?.try_into().unwrap();
-    let code_cell_outpoint = OutPoint::new(bytes_code_cell_outpoint.pack(), 0);
-
-    // Derive the lock args: blake2b_256(preimage_bytes)
-    // The simple-lock contract checks: blake2b_256(witness.preimage) == args
     let preimage_bytes = hex::decode(&preimage_hex)?;
-    let lock_args_hash = blake2b_256(preimage_bytes.as_slice());
+    // simple-lock args = blake2b_256(preimage) — 32 bytes
+    let lock_args = blake2b_256(preimage_bytes.as_slice()).to_vec();
+
+    let outpoint = create_locked_cell_generic(
+        &config.ckb_rpc,
+        &config.address,
+        config.secret_key()?,
+        &string_code_cell_outpoint,
+        lock_args.clone(),
+        70464,
+        "simple-lock",
+    )?;
+
+    println!("Locked cell created.");
+    println!("Outpoint: {:#x}:0x0", outpoint.tx_hash());
+    println!("Lock args (preimage hash): {}", hex::encode(&lock_args));
+    println!("Preimage hex (needed for spend): {preimage_hex}");
+
+    Ok(())
+}
+
+/// Create a cell locked by the timelock-lock script.
+///
+/// Args (positional):
+///   <code_cell_tx_hash>  hex tx hash of the deployed timelock-lock code cell
+///   <pubkey_hex>         33-byte compressed secp256k1 public key in hex
+///   <extra_commitment>   32-byte hex commitment for extra payload, or "" for zeros
+pub fn create_timelock_cell(
+    mut args: impl Iterator<Item = String>,
+    config: &crate::config::Config,
+) -> anyhow::Result<()> {
+    let [string_code_cell_outpoint, pubkey_hex, extra_commitment_hex] =
+        [args.next(), args.next(), args.next()].map(|x| x.expect("Missing arg"));
+
+    // timelock-lock args layout: [pubkey (33 bytes)][commitment (32 bytes)]
+    let pubkey_bytes = hex::decode(&pubkey_hex)?;
+    if pubkey_bytes.len() != 33 {
+        anyhow::bail!(
+            "pubkey must be 33 bytes (compressed secp256k1), got {}",
+            pubkey_bytes.len()
+        );
+    }
+
+    let commitment_bytes = if extra_commitment_hex.is_empty() {
+        vec![0u8; 32]
+    } else {
+        let b = hex::decode(&extra_commitment_hex)?;
+        if b.len() != 32 {
+            anyhow::bail!("extra_commitment must be 32 bytes, got {}", b.len());
+        }
+        b
+    };
+
+    let mut lock_args = Vec::with_capacity(65);
+    lock_args.extend_from_slice(&pubkey_bytes);
+    lock_args.extend_from_slice(&commitment_bytes);
+
+    let outpoint = create_locked_cell_generic(
+        &config.ckb_rpc,
+        &config.address,
+        config.secret_key()?,
+        &string_code_cell_outpoint,
+        lock_args,
+        70464,
+        "timelock-lock",
+    )?;
+
+    println!("Timelock cell created.");
+    println!("Outpoint: {:#x}:0x0", outpoint.tx_hash());
+    println!("Pubkey: {pubkey_hex}");
+    println!("Extra commitment: {extra_commitment_hex}");
+
+    Ok(())
+}
+
+/// Generic cell creation: deploys a cell locked by any script with pre-built args.
+///
+/// - `code_cell_tx_hash_hex`: hex string of the code cell's transaction hash
+/// - `lock_args`: the raw args bytes for the lock script
+/// - `capacity_ckb`: the capacity to lock in the cell (in CKB, not shannons)
+/// - `script_label`: a human-readable label used in logging
+pub fn create_locked_cell_generic(
+    ckb_rpc: &str,
+    funder_address: &str,
+    funder_key: SecretKey,
+    code_cell_tx_hash_hex: &str,
+    lock_args: Vec<u8>,
+    capacity_ckb: u64,
+    script_label: &str,
+) -> anyhow::Result<OutPoint> {
+    let bytes_code: [u8; 32] = hex::decode(code_cell_tx_hash_hex)?.try_into().unwrap();
+    let code_cell_outpoint = OutPoint::new(bytes_code.pack(), 0);
 
     let ckb_client = CkbRpcClient::new(ckb_rpc);
-
-    // Get the code_hash of the deployed simple-lock binary from chain
     let (code_hash_packed, _) = fetch_code_cell_data(&ckb_client, &code_cell_outpoint)?;
 
-    // Build the simple-lock script:
-    //   code_hash = hash of the deployed binary (+ IDL commitment)
-    //   hash_type = Data1
-    //   args      = blake2b_256(preimage) — 32 bytes
-    let simple_lock_script = Script::new_builder()
+    let lock_script = Script::new_builder()
         .code_hash(code_hash_packed)
         .hash_type(ScriptHashType::Data1.into())
-        .args(Bytes::from(lock_args_hash.to_vec()).pack())
+        .args(Bytes::from(lock_args).pack())
         .build();
 
-    // Register the simple-lock code cell as a cell dep so the VM can load it
     let code_cell_dep = CellDep::new_builder()
         .out_point(code_cell_outpoint)
         .dep_type(DepType::Code.into())
         .build();
 
-    // The cell being created — locked by simple-lock, no data, 70 CKB capacity
     let locked_cell_output = CellOutput::new_builder()
-        .capacity((70464 * 100_000_000).pack())
-        .lock(simple_lock_script.clone())
+        .capacity((capacity_ckb * 100_000_000).pack())
+        .lock(lock_script.clone())
         .build();
 
     let funder_addr = Address::from_str(funder_address)
         .map_err(|e| anyhow::anyhow!("invalid funder address: {e}"))?;
     let funder_lock: Script = funder_addr.payload().into();
 
-    // Funding setup — the transaction pays from the funder's secp256k1 wallet
     let signer = SecpCkbRawKeySigner::new_with_secret_keys(vec![funder_key]);
     let sighash_unlocker = SecpSighashUnlocker::from(Box::new(signer) as Box<_>);
     let sighash_script_id = ScriptId::new_type(SIGHASH_TYPE_HASH.clone());
@@ -471,19 +542,13 @@ pub fn create_locked_cell(
     let mut cell_dep_resolver = DefaultCellDepResolver::from_genesis(
         &ckb_client.get_block_by_number(0.into())?.unwrap().into(),
     )?;
-    // Register the simple-lock code dep so build_unlocked can resolve it
-    let simple_lock_script_id = ScriptId::new_data(simple_lock_script.calc_script_hash().unpack());
-    cell_dep_resolver.insert(
-        simple_lock_script_id,
-        code_cell_dep,
-        "simple-lock".to_string(),
-    );
+    let script_id = ScriptId::new_data(lock_script.calc_script_hash().unpack());
+    cell_dep_resolver.insert(script_id, code_cell_dep, script_label.to_string());
 
     let header_dep_resolver = DefaultHeaderDepResolver::new(ckb_rpc);
     let tx_dep_provider = DefaultTransactionDependencyProvider::new(ckb_rpc, 10);
 
     let builder = CapacityTransferBuilder::new(vec![(locked_cell_output, Bytes::new())]);
-
     let (tx, _) = builder.build_unlocked(
         &mut cell_collector,
         &cell_dep_resolver,
@@ -494,10 +559,5 @@ pub fn create_locked_cell(
     )?;
 
     let tx_hash = ckb_client.send_transaction(tx.data().into(), None)?;
-    println!("Locked cell created.");
-    println!("Outpoint: {:#x}:0x0", tx_hash);
-    println!("Lock args (preimage hash): {}", hex::encode(lock_args_hash));
-    println!("Preimage hex (needed for spend): {preimage_hex}");
-
-    Ok(())
+    Ok(OutPoint::new(tx_hash.pack(), 0))
 }

@@ -12,19 +12,40 @@ fn main() -> anyhow::Result<()> {
 
     let args = std::env::args().skip(2);
     let config = Config::from_env()?;
+
     match command.as_str() {
+        // ── SUDT (legacy) ────────────────────────────────────────────────────
         "deploy-sudt" => {
             deploy_and_mint_sudt()?;
         }
+
+        // ── simple-lock ──────────────────────────────────────────────────────
         "deploy-simple-lock" => {
             spend::deploy_simple_lock()?;
         }
-        "spend-simple-lock" => {
-            spend::spend_simple_lock(args)?;
-        }
+        // create-locked-cell <code_tx_hash> <preimage_hex>
         "create-locked-cell" => {
             deploy_script::create_locked_cell(args, &config)?;
         }
+        // spend-simple-lock <code_tx_hash> <preimage_hex> <idl_path> <locked_tx_hash>
+        "spend-simple-lock" => {
+            spend::spend_simple_lock(args)?;
+        }
+
+        // ── timelock-lock ────────────────────────────────────────────────────
+        "deploy-timelock-lock" => {
+            spend::deploy_timelock_lock()?;
+        }
+        // create-timelock-cell <code_tx_hash> <pubkey_hex> <extra_commitment_hex|"">
+        "create-timelock-cell" => {
+            deploy_script::create_timelock_cell(args, &config)?;
+        }
+        // spend-timelock-lock <code_tx_hash> <signing_key_hex> <unlock_after_ms>
+        //                     <extra_hex|""> <idl_path> <locked_tx_hash>
+        "spend-timelock-lock" => {
+            spend::spend_timelock_lock(args)?;
+        }
+
         other => anyhow::bail!("unknown command: {other}"),
     }
 

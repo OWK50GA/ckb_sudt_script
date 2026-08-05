@@ -59,11 +59,8 @@ fn load_timelock_idl() -> IdlDocument {
 ///   [ extra_len: 4 bytes LE ][ extra: extra_len bytes ]
 fn encode_timelock_witness(signature: &[u8; 65], unlock_after_ms: u64, extra: &[u8]) -> Vec<u8> {
     let mut buf = Vec::new();
-    // Fixed: signature (65 bytes)
     buf.extend_from_slice(signature);
-    // Fixed: unlock_after_ms (8 bytes LE)
     buf.extend_from_slice(&unlock_after_ms.to_le_bytes());
-    // Variable: extra (4-byte LE length prefix + payload)
     let extra_len = extra.len() as u32;
     buf.extend_from_slice(&extra_len.to_le_bytes());
     buf.extend_from_slice(extra);
@@ -80,8 +77,6 @@ const FAKE_SIG: [u8; 65] = [0x01u8; 65];
 const DUMMY_PUBKEY: [u8; 33] = [0x02u8; 33];
 
 /// Build args for timelock-lock.
-///   pubkey_bytes: 33 bytes at args[0..33]
-///   commitment:   optional 32 bytes at args[33..65]
 fn build_args(commitment: Option<[u8; 32]>) -> Bytes {
     let mut args = DUMMY_PUBKEY.to_vec();
     if let Some(c) = commitment {
@@ -90,13 +85,11 @@ fn build_args(commitment: Option<[u8; 32]>) -> Bytes {
     Bytes::from(args)
 }
 
-/// Deploy timelock-lock and create a locked cell, already linked to a
-/// header with the given block timestamp.
-/// Returns (context, locked_cell_outpoint).
+/// Deploy timelock-lock and create a locked cell linked to a header
+/// with the given block timestamp.
 fn setup_timelock_cell(args: Bytes, block_timestamp_ms: u64) -> (Context, OutPoint) {
     let mut context = Context::default();
 
-    // Insert header FIRST — link_cell_with_block requires it to already exist.
     let header = ckb_testtool::ckb_types::core::HeaderBuilder::default()
         .timestamp(block_timestamp_ms)
         .build();
@@ -114,7 +107,6 @@ fn setup_timelock_cell(args: Bytes, block_timestamp_ms: u64) -> (Context, OutPoi
         Bytes::new(),
     );
 
-    // Link the cell to its block — enables load_header(0, Source::GroupInput).
     context.link_cell_with_block(locked_cell.clone(), header.hash(), 0);
 
     (context, locked_cell)
@@ -127,7 +119,7 @@ fn build_always_success_output(context: &mut Context) -> Script {
         .expect("always-success")
 }
 
-/// Submit a transaction and return the result.
+/// Build and run a spend transaction for the locked cell.
 fn run_tx(
     context: &mut Context,
     locked_cell: OutPoint,
@@ -162,7 +154,6 @@ fn run_tx(
 // PSCT structural validation tests (no VM)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// The IDL has 3 fields. Validate that the loader sees all three.
 #[test]
 fn test_idl_has_three_fields() {
     let idl = load_timelock_idl();
@@ -172,8 +163,6 @@ fn test_idl_has_three_fields() {
     assert_eq!(idl.witness[2].name, "extra");
 }
 
-/// A correctly encoded 3-field witness passes structural validation
-/// and decodes with the right types and values.
 #[test]
 fn test_witness_validation_passes_full_witness() {
     let idl = load_timelock_idl();
@@ -189,33 +178,26 @@ fn test_witness_validation_passes_full_witness() {
         .expect("full witness should pass structural validation");
 
     assert_eq!(validated.len(), 3);
-
-    // signature field
     assert_eq!(validated[0].name, "signature");
     assert_eq!(validated[0].type_, "secp256k1_sig");
     assert!(validated[0].required);
     assert_eq!(validated[0].value, DecodedValue::Bytes(sig.to_vec()));
 
-    // unlock_after_ms field
     assert_eq!(validated[1].name, "unlock_after_ms");
     assert_eq!(validated[1].type_, "uint64");
     assert!(validated[1].required);
     assert_eq!(validated[1].value, DecodedValue::U64(ts));
 
-    // extra field
     assert_eq!(validated[2].name, "extra");
     assert_eq!(validated[2].type_, "bytes");
-    assert!(!validated[2].required); // marked optional in IDL
+    assert!(!validated[2].required);
     assert_eq!(validated[2].value, DecodedValue::Bytes(extra.to_vec()));
 }
 
-/// Empty extra payload (optional field) is structurally valid.
 #[test]
 fn test_witness_validation_passes_empty_extra() {
     let idl = load_timelock_idl();
-    let sig = FAKE_SIG;
-    let ts: u64 = 0;
-    let wire = encode_timelock_witness(&sig, ts, &[]);
+    let wire = encode_timelock_witness(&FAKE_SIG, 0, &[]);
 
     let client = IdlClient::new();
     let validated = client
@@ -224,13 +206,10 @@ fn test_witness_validation_passes_empty_extra() {
     assert_eq!(validated[2].value, DecodedValue::Bytes(vec![]));
 }
 
-/// A witness missing the entire unlock_after_ms + extra portion fails with FieldTooShort.
-/// Only providing the 65-byte signature is not enough.
 #[test]
 fn test_witness_validation_fails_missing_timestamp() {
     let idl = load_timelock_idl();
-    // Only the signature, nothing else
-    let buf = vec![0x01u8; 65];
+    let buf = vec![0x01u8; 65]; // only signature, no timestamp
 
     let client = IdlClient::new();
     let err = client
@@ -243,11 +222,9 @@ fn test_witness_validation_fails_missing_timestamp() {
     );
 }
 
-/// A witness truncated in the middle of the timestamp bytes fails.
 #[test]
 fn test_witness_validation_fails_truncated_timestamp() {
     let idl = load_timelock_idl();
-    // 65 bytes sig + 3 bytes of timestamp (need 8)
     let mut buf = vec![0x01u8; 65];
     buf.extend_from_slice(&[0x00, 0x01, 0x02]); // only 3 of 8 timestamp bytes
 
@@ -266,11 +243,9 @@ fn test_witness_validation_fails_truncated_timestamp() {
     );
 }
 
-/// A witness truncated in the middle of the extra length prefix fails.
 #[test]
 fn test_witness_validation_fails_truncated_extra_prefix() {
     let idl = load_timelock_idl();
-    // 65 sig + 8 ts + 2 bytes of the 4-byte length prefix for extra
     let mut buf = vec![0x01u8; 65];
     buf.extend_from_slice(&1_000u64.to_le_bytes());
     buf.extend_from_slice(&[0x00, 0x01]); // only 2 of 4 prefix bytes
@@ -290,7 +265,6 @@ fn test_witness_validation_fails_truncated_extra_prefix() {
     );
 }
 
-/// Trailing bytes after a complete witness fail.
 #[test]
 fn test_witness_validation_fails_trailing_bytes() {
     let idl = load_timelock_idl();
@@ -315,19 +289,16 @@ fn test_witness_validation_fails_trailing_bytes() {
 // Full PSCT flow: validate then execute via CKB VM
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// PSCT full flow: valid witness with timestamp already passed.
-/// PSCT check passes → transaction executes successfully.
+/// PSCT passes and VM accepts: unlock time has passed.
 #[test]
 fn test_psct_validate_then_execute_timelock_passes() {
     let idl = load_timelock_idl();
 
-    // unlock_after_ms in the past relative to block timestamp
     let unlock_after_ms: u64 = 1_000_000;
     let block_ts: u64 = 2_000_000; // block time is after unlock time → allowed
 
     let wire = encode_timelock_witness(&FAKE_SIG, unlock_after_ms, &[]);
 
-    // Step 1: PSCT structural validation
     let client = IdlClient::new();
     let validated = client
         .validate_witness_bytes(&idl.witness, &wire)
@@ -338,32 +309,28 @@ fn test_psct_validate_then_execute_timelock_passes() {
         println!("  {} ({}): {:?}", f.name, f.type_, f.value);
     }
 
-    // Step 2: execute the transaction
-    let args = build_args(None); // no extra commitment
+    let args = build_args(None);
     let (mut ctx, locked_cell) = setup_timelock_cell(args, block_ts);
     run_tx(&mut ctx, locked_cell, wire)
         .expect("transaction should succeed: timelock passed, sig non-zero");
 }
 
-/// PSCT passes but VM rejects because block timestamp is before unlock time.
-/// Demonstrates that PSCT catches structural errors, not semantic ones —
-/// the timelock constraint is enforced by the VM, not the IDL client.
+/// PSCT passes but VM rejects: block timestamp is before unlock time.
+/// Shows the PSCT / semantic boundary — the timelock is enforced by the VM only.
 #[test]
 fn test_psct_passes_but_vm_rejects_timelock_not_met() {
     let idl = load_timelock_idl();
 
     let unlock_after_ms: u64 = 9_999_999_999_999; // far in the future
-    let block_ts: u64 = 1_000; // block time is before unlock
+    let block_ts: u64 = 1_000;
 
     let wire = encode_timelock_witness(&FAKE_SIG, unlock_after_ms, &[]);
 
-    // PSCT passes — the structure is correct
     let client = IdlClient::new();
     client
         .validate_witness_bytes(&idl.witness, &wire)
         .expect("PSCT should pass: structure is valid even if timelock not met");
 
-    // VM rejects — TimelockNotMet = error code 12
     let args = build_args(None);
     let (mut ctx, locked_cell) = setup_timelock_cell(args, block_ts);
     let err = run_tx(&mut ctx, locked_cell, wire).unwrap_err();
@@ -373,83 +340,76 @@ fn test_psct_passes_but_vm_rejects_timelock_not_met() {
     );
 }
 
-/// PSCT passes but VM rejects because signature is all zeros.
-/// Illustrates the PSCT / semantic boundary: PSCT only checks structure.
+/// PSCT passes but VM rejects: signature is all zeros.
 #[test]
 fn test_psct_passes_but_vm_rejects_zero_signature() {
     let idl = load_timelock_idl();
 
-    let zero_sig = [0u8; 65]; // all-zeros signature is rejected by the contract
+    let zero_sig = [0u8; 65];
+    let block_ts: u64 = 2_000_000;
     let wire = encode_timelock_witness(&zero_sig, 0, &[]);
 
-    // PSCT passes — 65 zero bytes is structurally a valid secp256k1_sig field
     let client = IdlClient::new();
     client
         .validate_witness_bytes(&idl.witness, &wire)
         .expect("PSCT should pass: zero sig is structurally valid");
 
-    // VM rejects — SignatureInvalid = error code 11
     let args = build_args(None);
-    let (mut ctx, locked_cell) = setup_timelock_cell(args);
-    let err = run_tx(&mut ctx, locked_cell, wire, 1_000).unwrap_err();
+    let (mut ctx, locked_cell) = setup_timelock_cell(args, block_ts);
+    let err = run_tx(&mut ctx, locked_cell, wire).unwrap_err();
     assert!(
         err.to_string().contains("error code 11"),
         "expected SignatureInvalid (11), got: {err}"
     );
 }
 
-/// Full flow with a non-empty extra payload whose hash matches the commitment in args.
-/// Tests the args[33..65] commitment path in check_timelock.
+/// Full flow: non-empty extra payload whose hash matches the commitment in args.
 #[test]
 fn test_psct_validate_then_execute_with_extra_payload() {
     let idl = load_timelock_idl();
 
     let extra_payload = b"session_token_or_merkle_proof";
     let commitment: [u8; 32] = blake2b_256(extra_payload);
+    let block_ts: u64 = 2_000_000;
 
     let wire = encode_timelock_witness(&FAKE_SIG, 0, extra_payload);
 
-    // PSCT structural check
     let client = IdlClient::new();
     let validated = client
         .validate_witness_bytes(&idl.witness, &wire)
         .expect("witness with extra should pass PSCT");
 
-    // Verify decoded extra payload matches what we put in
     assert_eq!(
         validated[2].value,
         DecodedValue::Bytes(extra_payload.to_vec())
     );
 
-    // VM execution with the commitment in args — should succeed
     let args = build_args(Some(commitment));
-    let (mut ctx, locked_cell) = setup_timelock_cell(args);
-    run_tx(&mut ctx, locked_cell, wire, 1_000)
+    let (mut ctx, locked_cell) = setup_timelock_cell(args, block_ts);
+    run_tx(&mut ctx, locked_cell, wire)
         .expect("transaction should succeed: commitment matches extra hash");
 }
 
-/// PSCT passes but VM rejects when extra hash mismatches the commitment in args.
+/// PSCT passes but VM rejects: extra hash mismatches commitment in args.
 #[test]
 fn test_psct_passes_but_vm_rejects_extra_hash_mismatch() {
     let idl = load_timelock_idl();
 
     let real_payload = b"correct_payload";
     let wrong_payload = b"wrong_payload";
+    let block_ts: u64 = 2_000_000;
 
-    // Commitment in args is for real_payload, but witness carries wrong_payload
     let commitment: [u8; 32] = blake2b_256(real_payload);
     let wire = encode_timelock_witness(&FAKE_SIG, 0, wrong_payload);
 
-    // PSCT passes — structure is valid
     let client = IdlClient::new();
     client
         .validate_witness_bytes(&idl.witness, &wire)
         .expect("PSCT should pass: structure valid even with wrong hash");
 
-    // VM rejects — Encoding = error code 4 (hash mismatch)
     let args = build_args(Some(commitment));
-    let (mut ctx, locked_cell) = setup_timelock_cell(args);
-    let err = run_tx(&mut ctx, locked_cell, wire, 1_000).unwrap_err();
+    let (mut ctx, locked_cell) = setup_timelock_cell(args, block_ts);
+    let err = run_tx(&mut ctx, locked_cell, wire).unwrap_err();
     assert!(
         err.to_string().contains("error code 4"),
         "expected Encoding error (4) on hash mismatch, got: {err}"
