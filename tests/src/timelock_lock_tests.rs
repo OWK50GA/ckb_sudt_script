@@ -87,7 +87,7 @@ fn build_args(commitment: Option<[u8; 32]>) -> Bytes {
 
 /// Deploy timelock-lock and create a locked cell linked to a header
 /// with the given block timestamp.
-fn setup_timelock_cell(args: Bytes, block_timestamp_ms: u64) -> (Context, OutPoint) {
+fn setup_timelock_cell(args: Bytes, block_timestamp_ms: u64) -> (Context, OutPoint, Byte32) {
     let mut context = Context::default();
 
     let header = ckb_testtool::ckb_types::core::HeaderBuilder::default()
@@ -109,7 +109,7 @@ fn setup_timelock_cell(args: Bytes, block_timestamp_ms: u64) -> (Context, OutPoi
 
     context.link_cell_with_block(locked_cell.clone(), header.hash(), 0);
 
-    (context, locked_cell)
+    (context, locked_cell, header.hash())
 }
 
 fn build_always_success_output(context: &mut Context) -> Script {
@@ -123,6 +123,7 @@ fn build_always_success_output(context: &mut Context) -> Script {
 fn run_tx(
     context: &mut Context,
     locked_cell: OutPoint,
+    header_dep: Byte32,
     wire: Vec<u8>,
 ) -> Result<u64, ckb_testtool::ckb_error::Error> {
     let output_lock = build_always_success_output(context);
@@ -140,6 +141,7 @@ fn run_tx(
         .build();
 
     let tx = TransactionBuilder::default()
+        .header_dep(header_dep)
         .input(input)
         .output(output)
         .output_data(Bytes::new().pack())
@@ -310,8 +312,8 @@ fn test_psct_validate_then_execute_timelock_passes() {
     }
 
     let args = build_args(None);
-    let (mut ctx, locked_cell) = setup_timelock_cell(args, block_ts);
-    run_tx(&mut ctx, locked_cell, wire)
+    let (mut ctx, locked_cell, header_dep) = setup_timelock_cell(args, block_ts);
+    run_tx(&mut ctx, locked_cell, header_dep, wire)
         .expect("transaction should succeed: timelock passed, sig non-zero");
 }
 
@@ -332,8 +334,8 @@ fn test_psct_passes_but_vm_rejects_timelock_not_met() {
         .expect("PSCT should pass: structure is valid even if timelock not met");
 
     let args = build_args(None);
-    let (mut ctx, locked_cell) = setup_timelock_cell(args, block_ts);
-    let err = run_tx(&mut ctx, locked_cell, wire).unwrap_err();
+    let (mut ctx, locked_cell, header_dep) = setup_timelock_cell(args, block_ts);
+    let err = run_tx(&mut ctx, locked_cell, header_dep, wire).unwrap_err();
     assert!(
         err.to_string().contains("error code 12"),
         "expected TimelockNotMet (12), got: {err}"
@@ -355,8 +357,8 @@ fn test_psct_passes_but_vm_rejects_zero_signature() {
         .expect("PSCT should pass: zero sig is structurally valid");
 
     let args = build_args(None);
-    let (mut ctx, locked_cell) = setup_timelock_cell(args, block_ts);
-    let err = run_tx(&mut ctx, locked_cell, wire).unwrap_err();
+    let (mut ctx, locked_cell, header_dep) = setup_timelock_cell(args, block_ts);
+    let err = run_tx(&mut ctx, locked_cell, header_dep, wire).unwrap_err();
     assert!(
         err.to_string().contains("error code 11"),
         "expected SignatureInvalid (11), got: {err}"
@@ -385,8 +387,8 @@ fn test_psct_validate_then_execute_with_extra_payload() {
     );
 
     let args = build_args(Some(commitment));
-    let (mut ctx, locked_cell) = setup_timelock_cell(args, block_ts);
-    run_tx(&mut ctx, locked_cell, wire)
+    let (mut ctx, locked_cell, header_dep) = setup_timelock_cell(args, block_ts);
+    run_tx(&mut ctx, locked_cell, header_dep, wire)
         .expect("transaction should succeed: commitment matches extra hash");
 }
 
@@ -408,8 +410,8 @@ fn test_psct_passes_but_vm_rejects_extra_hash_mismatch() {
         .expect("PSCT should pass: structure valid even with wrong hash");
 
     let args = build_args(Some(commitment));
-    let (mut ctx, locked_cell) = setup_timelock_cell(args, block_ts);
-    let err = run_tx(&mut ctx, locked_cell, wire).unwrap_err();
+    let (mut ctx, locked_cell, header_dep) = setup_timelock_cell(args, block_ts);
+    let err = run_tx(&mut ctx, locked_cell, header_dep, wire).unwrap_err();
     assert!(
         err.to_string().contains("error code 4"),
         "expected Encoding error (4) on hash mismatch, got: {err}"
