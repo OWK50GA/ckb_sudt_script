@@ -75,8 +75,8 @@ fn check_timelock() -> Result<(), Error> {
         Witness::from_witness_args(0, Source::GroupInput).map_err(|_| Error::MissingWitness)?;
 
     // ── Step 2: timelock check ────────────────────────────────────────────────
-    // Load the header of the first input cell to read the block timestamp.
-    let header = ckb_std::high_level::load_header(0, Source::GroupInput)?;
+    // Load the transaction header dependency used as the time oracle.
+    let header = ckb_std::high_level::load_header(0, Source::HeaderDep)?;
     let block_timestamp_ms: u64 = header.raw().timestamp().unpack();
 
     if block_timestamp_ms < witness.unlock_after_ms {
