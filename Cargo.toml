@@ -2,13 +2,17 @@
 resolver = "2"
 
 members = [
-  # Please don't remove the following line, we use it to automatically
-  # detect insertion point for newly generated crates.
-  # @@INSERTION_POINT@@
+  "deployer",
+  "tests",
+]
+
+# The contracts are built separately via `make build` using their own
+# workspace roots. They are excluded here so that host-only dependencies
+# (reqwest, bytes, etc.) from the deployer are never compiled for RISC-V.
+exclude = [
   "contracts/simple-lock",
   "contracts/timelock-lock",
-  "contracts/ckb_sudt_script", "deployer",
-  "tests",
+  "contracts/ckb_sudt_script",
 ]
 
 [profile.release]
